@@ -78,11 +78,11 @@ console.log(f(1));
 
 优化之前有一个CheckBounds结点
 
-![image-20220209201740760](E:\TyporaImages\image-20220209201740760.png)
+![image-20220209201740760](https://s2.loli.net/2022/02/10/AsDvSQnB6iNhzcf.png)
 
 经过SimplifiedLoweringPhase，Checkbounds被优化了
 
-![image-20220209202107469](E:\TyporaImages\image-20220209202107469.png)
+![image-20220209202107469](https://s2.loli.net/2022/02/10/dErxWhiw6M2baQB.png)
 
 
 
@@ -145,7 +145,7 @@ console.log(f(1));
 
 该优化方式将形如` x + 1 + 2`优化成`x + 3`，如下图
 
-![image-20220209220735597](E:\TyporaImages\image-20220209220735597.png)
+![image-20220209220735597](https://s2.loli.net/2022/02/10/Z9J8wMW5Y1o4y7b.png)
 
 由之前的浮点数精度丢失可知`x + 1 + 1 <  x + 2`，NumberAdd结点range值将小于结点本身的值。
 
@@ -169,15 +169,15 @@ f(1);
 
 在Typer阶段，还未进行`x + 1 + 1 -> x + 2`的优化，t为`range(9007199254740989,9007199254740992)`，执行` t = t + 1 + 1;`后，t为`range(9007199254740991,9007199254740992)`，最终t为`range(2,3)`。如下图
 
-![image-20220209230130422](E:\TyporaImages\image-20220209230130422.png)
+![image-20220209230130422](https://s2.loli.net/2022/02/10/8jPwUXglFbDGYu6.png)
 
 在TypedLowering阶段，进行`x + 1 + 1 -> x + 2`的优化，t为`range(9007199254740989,9007199254740992)`，执行` t = t + 2;`后，t为`range(9007199254740991,9007199254740994)`，最终t为`range(2,5)`。正确优化应该如下图
 
-![image-20220209231013852](E:\TyporaImages\image-20220209231013852.png)
+![image-20220209231013852](https://s2.loli.net/2022/02/10/noHBuZa8x4gWRDI.png)
 
 但是题目中的代码只是将两个NumberConst合并，并没有更新根节点NumberAdd的range，所以在turbofan中NumberAdd结点仍然是未优化前的`range(9007199254740991,9007199254740992)`，如下图
 
-![image-20220209231431893](E:\TyporaImages\image-20220209231431893.png)
+![image-20220209231431893](https://s2.loli.net/2022/02/10/8oIPzi69JXjhYKV.png)
 
 可以看到NumberAdd本身的最大值`9007199254740992+2 = 9007199254740994`大于range最大值`9007199254740992`，最终NumberAdd本身的最大值5大于range最大值3。
 在SimplifLowing阶段，turbofan认为t最大值为3，小于数组长度4，因此将被优化。这样用t访问数组就可以实现越界读写
@@ -207,13 +207,13 @@ f(1);
 %SystemBreak();
 ```
 
-![image-20220209233922427](E:\TyporaImages\image-20220209233922427.png)
+![image-20220209233922427](https://s2.loli.net/2022/02/10/e1BEQhU2wnKqtT8.png)
 
 可以看到数组长度已经被修改为0x200，这样就可以读写大量数据
 
 若此时越界访问如`arr[100]`在debug版本下会触发FixedArray的DCHECK检查（release版本不会），可以注释相应的检查再重新编译
 
-![image-20220209235117586](E:\TyporaImages\image-20220209235117586.png)
+![image-20220209235117586](https://s2.loli.net/2022/02/10/3CIcjOZasEUWBx9.png)
 
 
 
