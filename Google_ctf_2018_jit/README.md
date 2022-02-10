@@ -29,34 +29,32 @@ ninja -C out.gn/x64.debug
 `CheckBounds`是用于检查JS数组是否越界所设置的结点，在SimplifiedLoweringPhase中可能会得到优化，相关代码在src/compiler/simplified-lowering.cc
 
 ```c++
- void VisitCheckBounds(Node* node, SimplifiedLowering* lowering) {
-    CheckParameters const& p = CheckParametersOf(node->op());
-    Type const index_type = TypeOf(node->InputAt(0));
-    Type const length_type = TypeOf(node->InputAt(1));
-    if (length_type.Is(Type::Unsigned31())) {
-      if (index_type.Is(Type::Integral32OrMinusZero())) {
-        // Map -0 to 0, and the values in the [-2^31,-1] range to the
-        // [2^31,2^32-1] range, which will be considered out-of-bounds
-        // as well, because the {length_type} is limited to Unsigned31.
-        VisitBinop(node, UseInfo::TruncatingWord32(),
-                   MachineRepresentation::kWord32);
-        if (lower()) {
-          CheckBoundsParameters::Mode mode =
-              CheckBoundsParameters::kDeoptOnOutOfBounds;
-          if (lowering->poisoning_level_ ==
-                  PoisoningMitigationLevel::kDontPoison &&
-              (index_type.IsNone() || length_type.IsNone() ||
-               (index_type.Min() >= 0.0 &&
-                index_type.Max() < length_type.Min()))) {	//
-            // The bounds check is redundant if we already know that
-            // the index is within the bounds of [0.0, length[.
-            //设置优化
-            mode = CheckBoundsParameters::kAbortOnOutOfBounds;
+   void VisitNode(Node* node, Truncation truncation,
+                 SimplifiedLowering* lowering) {
+    ......
+      case IrOpcode::kCheckBounds: {
+        const CheckParameters& p = CheckParametersOf(node->op());
+        Type index_type = TypeOf(node->InputAt(0));
+        Type length_type = TypeOf(node->InputAt(1));
+        if (index_type.Is(Type::Integral32OrMinusZero())) {
+          // Map -0 to 0, and the values in the [-2^31,-1] range to the
+          // [2^31,2^32-1] range, which will be considered out-of-bounds
+          // as well, because the {length_type} is limited to Unsigned31.
+          VisitBinop(node, UseInfo::TruncatingWord32(),
+                     MachineRepresentation::kWord32);
+          if (lower() && lowering->poisoning_level_ ==
+                             PoisoningMitigationLevel::kDontPoison) {
+            if (index_type.IsNone() || length_type.IsNone() ||
+                (index_type.Min() >= 0.0 &&
+                 index_type.Max() < length_type.Min())) {
+              // The bounds check is redundant if we already know that
+              // the index is within the bounds of [0.0, length[.
+              // 设置checkbounds优化
+              DeferReplacement(node, node->InputAt(0));
+            }
           }
-          NodeProperties::ChangeOp(
-              node, simplified()->CheckedUint32Bounds(p.feedback(), mode));
-        }
-	...
+        } else {
+    ......
   }
 ```
 
